@@ -190,6 +190,21 @@ pub mod simple_vault {
         Ok(())
     }
 
+        /// Админ создаёт второе хранилище vault (для второго токена пула).
+    pub fn init_second_storage(ctx: Context<InitSecondStorage>) -> Result<()> {
+        instructions::swap::init_second_storage_handler(ctx)
+    }
+
+    /// Админ меняет токены vault через CLMM-пул Raydium (CPI, подписывает vault PDA).
+    pub fn swap<'a, 'b, 'c: 'info, 'info>(
+        ctx: Context<'a, 'b, 'c, 'info, SwapVault<'info>>,
+        amount_in: u64,
+        minimum_amount_out: u64,
+        sqrt_price_limit_x64: u128,
+    ) -> Result<()> {
+        instructions::swap::swap_handler(ctx, amount_in, minimum_amount_out, sqrt_price_limit_x64)
+    }
+
     /// Закрыть позицию в Raydium CLMM через CPI.
     /// Выводит всю ликвидность обратно в vault, сжигает position NFT.
     pub fn close_raydium_position<'a, 'b, 'c: 'info, 'info>(
@@ -513,4 +528,6 @@ pub enum VaultError {
     VaultPaused,
     #[msg("Card still has shares: withdraw first")]
     CardHasShares,
+    #[msg("Swap output is below minimum_amount_out")]
+    SwapOutputTooLow,
 }
