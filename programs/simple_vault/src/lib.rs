@@ -208,16 +208,23 @@ pub mod simple_vault {
     /// Закрыть позицию в Raydium CLMM через CPI.
     /// Выводит всю ликвидность обратно в vault, сжигает position NFT.
     pub fn close_raydium_position<'a, 'b, 'c: 'info, 'info>(
-        ctx: Context<'a, 'b, 'c, 'info, CloseRaydiumPosition<'info>>,
+        ctx: Context<'a, 'b, 'c, 'info, ManageRaydiumPosition<'info>>,
         amount_0_min: u64,
         amount_1_min: u64,
     ) -> Result<()> {
-        instructions::close_position::handler(ctx, amount_0_min, amount_1_min)
+        instructions::close_position::close_handler(ctx, amount_0_min, amount_1_min)
+    }
+
+    /// Собрать комиссии позиции (decrease_liquidity_v2 с liquidity = 0). Только админ.
+    pub fn collect_fees<'a, 'b, 'c: 'info, 'info>(
+        ctx: Context<'a, 'b, 'c, 'info, ManageRaydiumPosition<'info>>,
+    ) -> Result<()> {
+        instructions::close_position::collect_fees_handler(ctx)
     }
 
     /// Открыть позицию в Raydium CLMM через CPI.
     /// Vault PDA = владелец NFT позиции.
-    /// Токены берутся из vault_token_account (MyToken) + vault_wsol_account (wSOL).
+    /// Токены берутся из vault_token_account (первый токен) и vault_second_account (второй).
     pub fn open_raydium_position<'a, 'b, 'c: 'info, 'info>(
         ctx: Context<'a, 'b, 'c, 'info, OpenRaydiumPosition<'info>>,
         tick_lower_index: i32,
@@ -530,4 +537,6 @@ pub enum VaultError {
     CardHasShares,
     #[msg("Swap output is below minimum_amount_out")]
     SwapOutputTooLow,
+    #[msg("Pool mints do not match vault tokens")]
+    InvalidPoolMints,
 }

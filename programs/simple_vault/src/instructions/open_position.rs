@@ -3,34 +3,27 @@ use anchor_spl::associated_token::AssociatedToken;
 use anchor_spl::token::Token;
 use anchor_spl::token_2022::Token2022;
 use anchor_spl::token_interface::{self, Approve, Mint, Revoke, TokenAccount};
-use raydium_clmm_cpi::{cpi, states::PoolState};
+use raydium_clmm_cpi::cpi;
 
-use crate::VaultState;
+use crate::{VaultError, VaultState};
 
-/// Открыть позицию в Raydium CLMM через CPI.
-///
-/// Поток:
-///   TypeScript → vault::open_raydium_position → Raydium CLMM CPI
-///
-/// Vault PDA выступает position_nft_owner (владелец позиции).
-/// Токены берутся из vault_token_account (MyToken) и wsol_account (wSOL) — оба
-/// принадлежат vault PDA, поэтому vault PDA подписывает CPI.
+/// Открыть позицию в Raydium CLMM на средства vault.
+/// Первый токен (vault_state.token_mint) берётся из vault_token_account,
+/// второй - из vault_second_account. NFT позиции (Token-2022) получает vault_state.
 #[derive(Accounts)]
 pub struct OpenRaydiumPosition<'info> {
-    /// Admin — платит rent за position NFT и tick arrays
+    /// Админ: подписывает и платит rent за NFT, personal_position и tick arrays
     #[account(mut)]
     pub admin: Signer<'info>,
 
-    /// Vault PDA — авторизация + владелец NFT позиции
     #[account(
         mut,
         seeds = [b"vault", vault_state.token_mint.as_ref()],
         bump = vault_state.bump,
-        constraint = vault_state.admin == admin.key() @ crate::VaultError::Unauthorized,
+        constraint = vault_state.admin == admin.key() @ VaultError::Unauthorized,
     )]
-    pub vault_state: Account<'info, VaultState>,
+    pub vault_state: Box<Account<'info, VaultState>>,
 
-    /// Vault token account (MyToken) — token0 или token1 в зависимости от пула
     #[account(
         mut,
         seeds = [b"vault_tokens", vault_state.token_mint.as_ref()],
@@ -38,70 +31,60 @@ pub struct OpenRaydiumPosition<'info> {
         token::mint = vault_state.token_mint,
         token::authority = vault_state,
     )]
-    pub vault_token_account: InterfaceAccount<'info, TokenAccount>,
+    pub vault_token_account: Box<InterfaceAccount<'info, TokenAccount>>,
 
-    /// wSOL account принадлежащий vault PDA (создаётся перед вызовом)
-    /// CHECK: проверяется через token::mint = wsol_mint, token::authority = vault_state
+    pub second_mint: Box<InterfaceAccount<'info, Mint>>,
+
     #[account(
         mut,
-        token::mint = wsol_mint,
+        seeds = [b"vault_second", vault_state.key().as_ref(), second_mint.key().as_ref()],
+        bump,
+        token::mint = second_mint,
         token::authority = vault_state,
     )]
-    pub vault_wsol_account: InterfaceAccount<'info, TokenAccount>,
+    pub vault_second_account: Box<InterfaceAccount<'info, TokenAccount>>,
 
-    /// wSOL mint: So11111111111111111111111111111111111111112
-    pub wsol_mint: InterfaceAccount<'info, Mint>,
-
-    // ─── Raydium CLMM аккаунты ────────────────────────────────────────────
-
-    /// Состояние пула
+    // ---- Raydium CLMM ----
+    /// CHECK: пул, проверяет Raydium
     #[account(mut)]
-    pub pool_state: AccountLoader<'info, PoolState>,
+    pub pool_state: UncheckedAccount<'info>,
 
-    /// Position NFT mint (новый keypair, создаётся Raydium)
+    /// CHECK: устаревший PDA, адрес из SDK getPdaProtocolPositionAddress
+    #[account(mut)]
+    pub protocol_position: UncheckedAccount<'info>,
+
+    /// Новый keypair, Raydium создаёт из него mint NFT
     #[account(mut)]
     pub position_nft_mint: Signer<'info>,
 
-    /// ATA позиции — принадлежит vault_state (владелец позиции)
-    /// CHECK: создаётся Raydium CPI
+    /// CHECK: ATA (Token-2022) vault_state для NFT, создаёт Raydium
     #[account(mut)]
     pub position_nft_account: UncheckedAccount<'info>,
 
-    /// Personal position state (создаётся Raydium)
-    /// CHECK: создаётся и валидируется Raydium
+    /// CHECK: PDA ["position", nft_mint], создаёт Raydium
     #[account(mut)]
     pub personal_position: UncheckedAccount<'info>,
 
-    /// Tick array нижней границы
-    /// CHECK: валидируется Raydium
+    /// CHECK: проверяет Raydium
     #[account(mut)]
     pub tick_array_lower: UncheckedAccount<'info>,
 
-    /// Tick array верхней границы
-    /// CHECK: валидируется Raydium
+    /// CHECK: проверяет Raydium
     #[account(mut)]
     pub tick_array_upper: UncheckedAccount<'info>,
 
-    /// Vault пула для token0
+    /// CHECK: хранилище пула token0, проверяет Raydium
     #[account(mut)]
-    pub token_vault_0: InterfaceAccount<'info, TokenAccount>,
+    pub token_vault_0: UncheckedAccount<'info>,
 
-    /// Vault пула для token1
+    /// CHECK: хранилище пула token1, проверяет Raydium
     #[account(mut)]
-    pub token_vault_1: InterfaceAccount<'info, TokenAccount>,
+    pub token_vault_1: UncheckedAccount<'info>,
 
-    /// Mint token0 пула
-    pub vault_0_mint: InterfaceAccount<'info, Mint>,
+    pub vault_0_mint: Box<InterfaceAccount<'info, Mint>>,
+    pub vault_1_mint: Box<InterfaceAccount<'info, Mint>>,
 
-    /// Mint token1 пула
-    pub vault_1_mint: InterfaceAccount<'info, Mint>,
-
-    /// Tick array bitmap extension
-    /// CHECK: валидируется Raydium
-    pub tick_array_bitmap: UncheckedAccount<'info>,
-
-    /// Raydium CLMM program (devnet: DRayAUgENGQBKVaX8owNhgzkEDyoHTGVEGHVJT1E9pfH)
-    /// CHECK: проверяется через address = raydium_clmm_cpi::id()
+    /// CHECK: адрес программы CLMM
     #[account(address = raydium_clmm_cpi::id())]
     pub clmm_program: UncheckedAccount<'info>,
 
@@ -122,75 +105,69 @@ pub fn handler<'a, 'b, 'c: 'info, 'info>(
     amount_0_max: u64,
     amount_1_max: u64,
 ) -> Result<()> {
-    require!(tick_lower_index < tick_upper_index, crate::VaultError::InvalidTickRange);
-    require!(liquidity > 0, crate::VaultError::ZeroAmount);
+    require!(tick_lower_index < tick_upper_index, VaultError::InvalidTickRange);
+    require!(liquidity > 0, VaultError::ZeroAmount);
 
-    let token_mint_key = ctx.accounts.vault_state.token_mint;
+    let first_mint = ctx.accounts.vault_state.token_mint;
+    let second_mint = ctx.accounts.second_mint.key();
+    let mint_0 = ctx.accounts.vault_0_mint.key();
+    let mint_1 = ctx.accounts.vault_1_mint.key();
+
+    // Какой из токенов vault в пуле token0
+    let first_is_0 = if mint_0 == first_mint && mint_1 == second_mint {
+        true
+    } else if mint_0 == second_mint && mint_1 == first_mint {
+        false
+    } else {
+        return err!(VaultError::InvalidPoolMints);
+    };
+
+    let first_info = ctx.accounts.vault_token_account.to_account_info();
+    let second_info = ctx.accounts.vault_second_account.to_account_info();
+    let (token_account_0, token_account_1) = if first_is_0 {
+        (first_info.clone(), second_info.clone())
+    } else {
+        (second_info.clone(), first_info.clone())
+    };
+    let (first_max, second_max) = if first_is_0 {
+        (amount_0_max, amount_1_max)
+    } else {
+        (amount_1_max, amount_0_max)
+    };
+
     let bump = ctx.accounts.vault_state.bump;
-    let vault_seeds: &[&[&[u8]]] = &[&[b"vault", token_mint_key.as_ref(), &[bump]]];
+    let signer_seeds: &[&[&[u8]]] = &[&[b"vault", first_mint.as_ref(), &[bump]]];
+    let vault_info = ctx.accounts.vault_state.to_account_info();
+    let admin_info = ctx.accounts.admin.to_account_info();
+    let token_prog = ctx.accounts.token_program.to_account_info();
 
-    // Определяем: vault_token_account = token0 или token1?
-    // Смотрим mint pool_vault_0: если совпадает с MyToken → token0, иначе → token1.
-    let my_token_mint = ctx.accounts.vault_state.token_mint;
-    let pool_mint_0 = ctx.accounts.vault_0_mint.key();
-
-    let (token_account_0, token_account_1) = if pool_mint_0 == my_token_mint {
-        // MyToken = token0, wSOL = token1
-        (
-            ctx.accounts.vault_token_account.to_account_info(),
-            ctx.accounts.vault_wsol_account.to_account_info(),
-        )
-    } else {
-        // wSOL = token0, MyToken = token1
-        (
-            ctx.accounts.vault_wsol_account.to_account_info(),
-            ctx.accounts.vault_token_account.to_account_info(),
-        )
-    };
-
-    // Raydium transfers tokens using payer (admin) as authority.
-    // Our vault accounts are owned by vault_state PDA → approve admin as delegate first.
-    let (my_token_max, wsol_max) = if pool_mint_0 == my_token_mint {
-        (amount_0_max, amount_1_max) // MyToken=token0, wSOL=token1
-    } else {
-        (amount_1_max, amount_0_max) // wSOL=token0, MyToken=token1
-    };
-
+    // 1. Raydium списывает токены от имени payer (admin).
+    //    Vault временно разрешает админу потратить не больше лимитов.
     token_interface::approve(
         CpiContext::new_with_signer(
-            ctx.accounts.token_program.to_account_info(),
-            Approve {
-                to: ctx.accounts.vault_token_account.to_account_info(),
-                delegate: ctx.accounts.admin.to_account_info(),
-                authority: ctx.accounts.vault_state.to_account_info(),
-            },
-            &[&[b"vault", token_mint_key.as_ref(), &[bump]]],
+            token_prog.clone(),
+            Approve { to: first_info.clone(), delegate: admin_info.clone(), authority: vault_info.clone() },
+            signer_seeds,
         ),
-        my_token_max,
+        first_max,
     )?;
-
     token_interface::approve(
         CpiContext::new_with_signer(
-            ctx.accounts.token_program.to_account_info(),
-            Approve {
-                to: ctx.accounts.vault_wsol_account.to_account_info(),
-                delegate: ctx.accounts.admin.to_account_info(),
-                authority: ctx.accounts.vault_state.to_account_info(),
-            },
-            &[&[b"vault", token_mint_key.as_ref(), &[bump]]],
+            token_prog.clone(),
+            Approve { to: second_info.clone(), delegate: admin_info.clone(), authority: vault_info.clone() },
+            signer_seeds,
         ),
-        wsol_max,
+        second_max,
     )?;
 
-    let remaining = ctx.remaining_accounts.to_vec();
-
+    // 2. CPI: открыть позицию, NFT получает vault_state
     let cpi_accounts = cpi::accounts::OpenPositionWithToken22Nft {
-        payer: ctx.accounts.admin.to_account_info(),
-        position_nft_owner: ctx.accounts.vault_state.to_account_info(), // vault PDA владеет NFT
+        payer: admin_info.clone(),
+        position_nft_owner: vault_info.clone(),
         position_nft_mint: ctx.accounts.position_nft_mint.to_account_info(),
         position_nft_account: ctx.accounts.position_nft_account.to_account_info(),
         pool_state: ctx.accounts.pool_state.to_account_info(),
-        protocol_position: ctx.accounts.personal_position.to_account_info(),
+        protocol_position: ctx.accounts.protocol_position.to_account_info(),
         tick_array_lower: ctx.accounts.tick_array_lower.to_account_info(),
         tick_array_upper: ctx.accounts.tick_array_upper.to_account_info(),
         personal_position: ctx.accounts.personal_position.to_account_info(),
@@ -200,19 +177,18 @@ pub fn handler<'a, 'b, 'c: 'info, 'info>(
         token_vault_1: ctx.accounts.token_vault_1.to_account_info(),
         rent: ctx.accounts.rent.to_account_info(),
         system_program: ctx.accounts.system_program.to_account_info(),
-        token_program: ctx.accounts.token_program.to_account_info(),
+        token_program: token_prog.clone(),
         associated_token_program: ctx.accounts.associated_token_program.to_account_info(),
         token_program_2022: ctx.accounts.token_program_2022.to_account_info(),
         vault_0_mint: ctx.accounts.vault_0_mint.to_account_info(),
         vault_1_mint: ctx.accounts.vault_1_mint.to_account_info(),
     };
-
     let cpi_ctx = CpiContext::new_with_signer(
         ctx.accounts.clmm_program.to_account_info(),
         cpi_accounts,
-        vault_seeds,
+        signer_seeds,
     )
-    .with_remaining_accounts(remaining);
+    .with_remaining_accounts(ctx.remaining_accounts.to_vec());
 
     cpi::open_position_with_token22_nft(
         cpi_ctx,
@@ -223,38 +199,25 @@ pub fn handler<'a, 'b, 'c: 'info, 'info>(
         liquidity,
         amount_0_max,
         amount_1_max,
-        true,        // with_metadata
-        Some(false), // base_flag: использовать amount_1 как базу
+        false, // with_metadata: не нужно, дешевле rent
+        None,  // base_flag: используем liquidity из SDK, amount_*_max - лимиты
     )?;
 
-    // Revoke delegation after CPI
-    token_interface::revoke(
-        CpiContext::new_with_signer(
-            ctx.accounts.token_program.to_account_info(),
-            Revoke {
-                source: ctx.accounts.vault_token_account.to_account_info(),
-                authority: ctx.accounts.vault_state.to_account_info(),
-            },
-            &[&[b"vault", token_mint_key.as_ref(), &[bump]]],
-        ),
-    )?;
-
-    token_interface::revoke(
-        CpiContext::new_with_signer(
-            ctx.accounts.token_program.to_account_info(),
-            Revoke {
-                source: ctx.accounts.vault_wsol_account.to_account_info(),
-                authority: ctx.accounts.vault_state.to_account_info(),
-            },
-            &[&[b"vault", token_mint_key.as_ref(), &[bump]]],
-        ),
-    )?;
+    // 3. Отозвать разрешение
+    token_interface::revoke(CpiContext::new_with_signer(
+        token_prog.clone(),
+        Revoke { source: first_info, authority: vault_info.clone() },
+        signer_seeds,
+    ))?;
+    token_interface::revoke(CpiContext::new_with_signer(
+        token_prog,
+        Revoke { source: second_info, authority: vault_info },
+        signer_seeds,
+    ))?;
 
     msg!(
-        "Position opened: tick_lower={}, tick_upper={}, liquidity={}",
-        tick_lower_index,
-        tick_upper_index,
-        liquidity
+        "Position opened: ticks {}..{}, liquidity={}, max0={}, max1={}",
+        tick_lower_index, tick_upper_index, liquidity, amount_0_max, amount_1_max
     );
     Ok(())
 }
