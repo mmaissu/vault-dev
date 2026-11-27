@@ -116,7 +116,11 @@ export default function Admin({ program, connection, admin, run, vaultTka, vault
         .preInstructions([cu(400_000)])
         .rpc(),
     )
-    if (ok) load()
+    if (ok) {
+      setOpenTkb('')
+      setOpenPlan(null)
+      load()
+    }
   }
 
   const calcOpen = () =>
@@ -153,6 +157,7 @@ export default function Admin({ program, connection, admin, run, vaultTka, vault
     )
     if (ok) {
       setOpenPlan(null)
+      setOpenTkb('')
       load()
     }
   }
@@ -183,6 +188,7 @@ export default function Admin({ program, connection, admin, run, vaultTka, vault
     )
     if (ok) {
       setSwapPlan(null)
+      setOpenTkb('')
       load()
     }
   }
